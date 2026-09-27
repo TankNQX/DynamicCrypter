@@ -80,6 +80,18 @@ constexpr char16_t kU16[] = u"UTF-16 polymorphic round trip 0123456789";
 constexpr char32_t kU32[] = U"UTF-32 polymorphic round trip 0123456789";
 
 // ---------------------------------------------------------------------------
+//  Namespace-scope call sites
+// ---------------------------------------------------------------------------
+//  CRYPT_STR() carries no capture, so its input contract is a string literal or
+//  an array with static storage duration: a function-local array is an odr-use
+//  of a variable the lambda cannot capture, and does not compile. These two
+//  sites pin that contract down - anything that made the macro capture (a
+//  `[&]`, say) would break them, and with them every namespace-scope use.
+const char kStaticStorageArray[] = "static storage array";
+static const auto kLiteralSite = CRYPT_STR("namespace scope literal");
+static const auto kArraySite = CRYPT_STR(kStaticStorageArray);
+
+// ---------------------------------------------------------------------------
 //  Compile-time proofs
 // ---------------------------------------------------------------------------
 
@@ -252,6 +264,15 @@ static_assert(CRYPTER_SITE_HASH(10, 5) != CRYPTER_SITE_HASH(11, 5),
               "the site hash ignores the line number");
 static_assert(CRYPTER_SITE_HASH(10, 5) != CRYPTER_SITE_HASH(10, 6),
               "the site hash ignores the counter");
+
+// Both multipliers are odd by design: an even one would push the low bit of its
+// product to zero before mix32() ever sees it, so the invariant is proved here
+// rather than left to a comment (0x1E35A, the line multiplier this started as,
+// looks odd at a glance and is not).
+static_assert((DynamicCrypter::detail::kSiteHashLineMultiplier % 2u) == 1u,
+              "the site-hash line multiplier must be odd");
+static_assert((DynamicCrypter::detail::kSiteHashCounterMultiplier % 2u) == 1u,
+              "the site-hash counter multiplier must be odd");
 
 // ---------------------------------------------------------------------------
 //  The per-build salt has to reach the key material. mix32 is a bijection, so
@@ -538,6 +559,11 @@ int main() {
         report("valid while its object lives",
                same_text(hosted.get(), "https://secure-endpoint.local"));
     }
+
+    // Sites at namespace scope: the macro's lambda captures nothing, so a
+    // literal and an array with static storage duration are the whole contract.
+    report("a namespace scope literal", same_text(kLiteralSite.get(), "namespace scope literal"));
+    report("a static storage array", same_text(kArraySite.get(), kStaticStorageArray));
 
     {
         auto wide = CRYPT_STR(L"Wide-String Hello Protection");

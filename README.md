@@ -23,7 +23,7 @@ Inspired by the structural architecture of `skCrypter`. Rather than eight hand-w
 | Language | C++17 (`/std:c++17`, `-std=c++17`) |
 | Toolchains | MSVC 2017+, GCC 7+, Clang 5+, ICC and other conforming C++17 compilers |
 | Architectures | Any |
-| Character types | `char`, `wchar_t`, `char16_t`, `char32_t` (1, 2 and 4 byte widths) |
+| Character types | `char`, `wchar_t`, `char16_t`, `char32_t` (1, 2 and 4 byte widths); wider types are refused at compile time |
 
 The header checks its own configuration, so including it without C++17 produces
 
@@ -92,6 +92,8 @@ std::cout << message.get();       // .get() / .c_str() / .data() / .size()
 Note that **variadic argument lists never apply user-defined conversions**, so `printf("%s", CRYPT_STR(...))` would pass the wrapper object rather than the pointer. Use `.get()`. The same goes for a wide stream: `std::wcout << CRYPT_STR(L"...")` prints the *pointer*, because the wide-string inserter is a function template and template argument deduction cannot see through a user-defined conversion, which leaves the `const void*` overload as the match. `std::wcout << CRYPT_STR(L"...").get()` prints the text - and the `char` case needs no `.get()`, because a narrow stream has a plain `const char*` member overload.
 
 Several objects can be alive at once, and each owns its own buffer: two `CRYPT_STR(...)` calls at *different* call sites are independent (e.g. `CRYPT_STR("x") == CRYPT_STR("y")`), and re-entering the *same* call site is independent as well, because there is no shared per-site state to keep in step.
+
+The characters have to come from a string literal or an array with **static storage duration**. Each call site seeds itself from one `static const` blob, built inside a lambda that captures nothing, so a function-local array is refused at compile time rather than being accepted and then silently reusing the first ciphertext it produced.
 
 ### 2. Pointer lifetime
 

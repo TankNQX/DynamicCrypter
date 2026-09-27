@@ -786,10 +786,22 @@ namespace DynamicCrypter {
         static_assert(Size > 0,
                       "DynamicCrypter: an encrypted string must contain at least one character");
 
+        // The engine is 32 bit throughout: every keystream generator, the
+        // chaining IV, mix32() and mul_odd fold through uint32_t, and the
+        // byte-at-a-time helpers (sbox_word, swap_nibbles) and mul_high shift a
+        // byte-wide value by up to sizeof(U) * 8 - 8, which only stays inside
+        // the type while U is at most four bytes. A wider character type would
+        // lose its top bits in mul_odd and shift out of range in the others, so
+        // it is refused here rather than accepted and failing later.
+        static_assert(sizeof(CharType) <= 4u,
+                      "DynamicCrypter: the character type must be at most four bytes wide");
+
     public:
         // Compile-time encryption. Accepts a string literal or any character
         // array; if the input is not a constant expression the very same
-        // constructor simply runs at run time.
+        // constructor simply runs at run time. CRYPT_STR() is stricter about
+        // what it will hand over - see its comment - but this is the
+        // constructor every one of its site blobs is built from.
         constexpr EncryptedString(const CharType* plaintext) noexcept : _storage{} {
             detail::transform_forward<FlavourT, Seed, CharType, Size>(_storage, plaintext);
         }
@@ -964,7 +976,7 @@ namespace DynamicCrypter {
         // 16 bit __LINE__, say) collide with its neighbour before mix32 ever
         // runs. Named rather than inlined so the constants can be inspected and
         // tuned in one place.
-        constexpr uint32_t kSiteHashLineMultiplier = 0x1E35Au;
+        constexpr uint32_t kSiteHashLineMultiplier = 0x1E35Bu;
         constexpr uint32_t kSiteHashCounterMultiplier = 0x7B13u;
 
     } // namespace detail
@@ -999,6 +1011,15 @@ namespace DynamicCrypter {
 //  the ciphertext stays a read-only compile-time constant and the buffer being
 //  flipped is always the object's own.
 //
+//  The input has to be a string literal or an array with static storage
+//  duration. CRYPT_STR() builds its site blob in a lambda that captures
+//  nothing, so a function-local array is an odr-use of a variable that lambda
+//  cannot reach and does not compile at all - and it should not be accepted
+//  even if it could: the blob is a single `static`, built once per call site,
+//  so an array whose characters changed between calls would keep decoding the
+//  first ciphertext it was built from. A literal or a static array is the
+//  whole input contract.
+//
 //  The pointer stays valid only while the object lives, so a const char* that
 //  has to outlive the statement cannot come from here: copy the characters into
 //  storage the caller owns.
@@ -1008,8 +1029,9 @@ namespace DynamicCrypter {
         using CRYPTER_CHAR_T =                                                                 \
             std::remove_cv_t<std::remove_pointer_t<std::decay_t<decltype(str)>>>;              \
         static_assert(std::is_array<std::remove_reference_t<decltype(str)>>::value,            \
-                      "CRYPT_STR() needs a string literal or a character array, "              \
-                      "not a pointer: sizeof() would not know the length");                    \
+                      "CRYPT_STR() needs a string literal or an array with "                   \
+                      "static storage duration, not a pointer: sizeof() would "                \
+                      "not know the length");                                                  \
         constexpr size_t CRYPTER_SIZE_T = sizeof(str) / sizeof(CRYPTER_CHAR_T);                \
         constexpr uint32_t CRYPTER_HASH_T = CRYPTER_SITE_HASH(__LINE__, CRYPTER_COUNTER);      \
         using CRYPTER_FLAVOUR_T = DynamicCrypter::FlavourOf<CRYPTER_HASH_T>;                    \
