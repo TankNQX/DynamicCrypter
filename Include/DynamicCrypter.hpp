@@ -54,8 +54,18 @@
 #endif
 
 // __COUNTER__ is an extension (MSVC, GCC, Clang, ICC, ...) but a very common
-// one. Without it we degrade to __LINE__, which still yields working - though
-// less varied - per-string flavours.
+// one, and it is always preferred: it is the only input that is unique per
+// expansion. Without it we degrade to __LINE__, which still yields working -
+// though less varied - per-string flavours.
+//
+// The limitation of that fallback is worth spelling out, because it is
+// invisible at the call site: __LINE__ is constant for the whole line, so two
+// CRYPT_STR() on the same source line expand to the same site hash and
+// therefore share a flavour and a seed. Their ciphertext is still correct -
+// each site encrypts and decrypts with the same flavour - but the strings are
+// no longer independently flavoured, and the same plaintext on the same line
+// produces the same bytes. Put one CRYPT_STR() per line when __COUNTER__ is
+// not available and the distinction matters.
 #if defined(__COUNTER__)
 #  define CRYPTER_COUNTER __COUNTER__
 #else
@@ -292,13 +302,33 @@ namespace DynamicCrypter {
             uint8_t inverse[256];
 
             constexpr SboxTables() noexcept : forward{}, inverse{} {
-                // power[k] == 3^k in GF(2^8); 3 generates the multiplicative group.
+                // Every member has to be initialized in this list: a constexpr
+                // constructor may not leave a member uninitialized, and an
+                // array member has no other initializer to give it. The bodies
+                // below then fill every element of both arrays.
+
+                // power[k] == 3^k in GF(2^8); 3 generates the multiplicative
+                // group. The loop writes all 256 entries - index 0 is set
+                // explicitly as the seed of the recurrence - so the zero
+                // initializer looks redundant, and removing it looks harmless.
+                // It is not. Default-initializing a local array inside a
+                // constant expression is only a C++20 extension (P1331):
+                // MSVC in /std:c++17 mode rejects it outright (C3615/C2131),
+                // and Clang reports -Wc++20-extensions, which a -Werror build
+                // escalates to an error. Swapping in std::array does not help
+                // either - it is an aggregate wrapping a raw array, so it
+                // diagnoses the same way, and Clang is even stricter about it.
                 uint8_t power[256] = {};
                 power[0] = 1u;
                 for (unsigned k = 1; k < 256u; ++k) {
                     power[k] = gf_mul(power[k - 1u], static_cast<uint8_t>(3u));
                 }
 
+                // This one is zero initialized for a second, independent
+                // reason: the loop below only reaches the 255 non-zero elements
+                // (0 has no logarithm), so index 0 keeps this initializer -
+                // which is exactly the "0 maps to itself" case, stated in code
+                // rather than in a comment.
                 uint8_t multiplicative_inverse[256] = {};
                 for (unsigned k = 0; k < 255u; ++k) {
                     // (3^k)^-1 == 3^(255-k), and 0 keeps its inverse of 0.
@@ -318,6 +348,10 @@ namespace DynamicCrypter {
         // and no storage at all if the S-box combiner is never instantiated.
         inline constexpr SboxTables g_sbox{};
 
+        // Also reachable from outside, on purpose: it is an ordinary function
+        // rather than only a static_assert, so a test can re-run the same proof
+        // at run time on the very tables the build used (the test driver does,
+        // including a known-answer check against the published AES S-box).
         constexpr bool sbox_is_bijection() noexcept {
             bool seen[256] = {};
             for (unsigned i = 0; i < 256u; ++i) {
@@ -569,11 +603,19 @@ namespace DynamicCrypter {
                                       static_cast<uint32_t>(Order::count));
         }
 
+        // Domain separation constant for the chain-start value. Any non-zero
+        // constant would do - all it has to do is keep the IV unrelated to the
+        // site hash and to the keystream seeds, so that the first character of
+        // a chained string is not chained to something derivable from the
+        // flavour alone. 0xA5A5A5A5u is the repeated "A5" decorrelation byte,
+        // which makes it easy to recognise in a debugger.
+        constexpr uint32_t kChainingIvSalt = 0xA5A5A5A5u;
+
         // Chain state that precedes the first processed character. Non-zero so
         // that a chained mode never leaves the first character untouched.
         template <typename U, uint32_t Seed>
         constexpr U chaining_iv() noexcept {
-            return static_cast<U>(static_cast<U>(mix32(Seed ^ 0xA5A5A5A5u)) | static_cast<U>(1u));
+            return static_cast<U>(static_cast<U>(mix32(Seed ^ kChainingIvSalt)) | static_cast<U>(1u));
         }
 
         // -------------------------------------------------------------------
@@ -587,10 +629,23 @@ namespace DynamicCrypter {
             constexpr Mode MD = FlavourT::mode;
             constexpr Order OD = FlavourT::order;
 
+            // make_keystream writes every element, so the zero initializer
+            // looks removable. It is not - see the note on SboxTables::power:
+            // default-initialization in a constant expression is a C++20
+            // extension, so it has to stay for MSVC /std:c++17 and for any
+            // -Werror build. These transforms are constant expressions by
+            // design; that is what makes CRYPT_STR() encrypt at compile time.
             U keys[Size] = {};
             make_keystream<KG, Seed>(keys);
 
-            [[maybe_unused]] U previous = chaining_iv<U, Seed>();
+            // Feedback from the step before this one. Only the chained modes
+            // ever read it, so the plain zero keeps stream mode away from an
+            // indeterminate value, while chaining_iv() is evaluated only where
+            // a chain actually starts.
+            [[maybe_unused]] U previous = 0;
+            if constexpr (MD != Mode::stream) {
+                previous = chaining_iv<U, Seed>();
+            }
 
             for (size_t step = 0; step < Size; ++step) {
                 const size_t i = step_index<OD, Seed, Size>(step);
@@ -657,19 +712,27 @@ namespace DynamicCrypter {
             constexpr Mode MD = FlavourT::mode;
             constexpr Order OD = FlavourT::order;
 
+            // See transform_forward: the initializer cannot be dropped, for the
+            // same C++17 constant-expression reason.
             U keys[Size] = {};
             make_keystream<FlavourT::keygen, Seed>(keys);
 
-            [[maybe_unused]] const U iv = chaining_iv<U, Seed>();
+            // The same feedback as the forward transform, walking the processing
+            // order backwards: for step `s` the chain state is the ciphertext
+            // produced at step `s - 1`, and the IV before the first step. Only
+            // the chained modes read it.
+            [[maybe_unused]] U previous = 0;
 
             for (size_t step = Size; step-- > 0;) {
                 const size_t i = step_index<OD, Seed, Size>(step);
                 const U cipher = static_cast<U>(in[i]);
 
-                [[maybe_unused]] U previous = 0;
                 if constexpr (MD != Mode::stream) {
+                    // The slot of step - 1 has not been written yet in a
+                    // descending walk, so this read still sees ciphertext even
+                    // when the decode runs in place.
                     previous = (step == 0)
-                                   ? iv
+                                   ? chaining_iv<U, Seed>()
                                    : static_cast<U>(in[step_index<OD, Seed, Size>(step - 1)]);
                 }
 
@@ -813,6 +876,13 @@ namespace DynamicCrypter {
         // Decodes in place if the buffer holds ciphertext, and does nothing
         // otherwise, so a cleared object stays empty instead of being
         // resurrected. Returns the buffer either way.
+        //
+        // The state test stays a run-time branch, deliberately. `_state` is a
+        // property of this object and not of the flavour, so there is no
+        // constant expression to fold it into - a constexpr check would only
+        // restate what the compiler can already see. What the test costs is one
+        // compare on an already-loaded byte, and it is what keeps a cleared
+        // object from being decoded back to life.
         CRYPTER_FORCEINLINE const CharType* decrypt() const noexcept {
             if (_state == State::cipher) {
                 detail::transform_inverse<FlavourT, Seed, CharType, Size>(_storage, _storage);
@@ -846,7 +916,17 @@ namespace DynamicCrypter {
         // code. It stays best effort either way - the characters may also sit in
         // a register or in a copy the C library made - so read this as narrowing
         // the window, not as a guarantee.
+        //
+        // `cleared` is a terminal state, and it implies an all-zero buffer:
+        // nothing else ever sets it, and the only two operations that write the
+        // buffer - decrypt() and encrypt() - both skip it once the state is
+        // cleared. A second clear() therefore has nothing left to wipe and
+        // returns immediately, which also keeps the destructor from repeating
+        // the pass over an object that was already cleared.
         CRYPTER_FORCEINLINE void clear() const noexcept {
+            if (_state == State::cleared) {
+                return;
+            }
             volatile CharType* plain = _storage;
             for (size_t i = 0; i < Size; ++i) {
                 plain[i] = static_cast<CharType>(0);
@@ -875,10 +955,26 @@ namespace DynamicCrypter {
 //
 //  The hashing core takes the salt explicitly, so tests can vary it and prove
 //  that it really reaches the key material.
-#define CRYPTER_SITE_HASH_EX(line, counter, salt)                                  \
-    (DynamicCrypter::detail::mix32(static_cast<uint32_t>(line) * 0x1E35Au ^        \
-                                   static_cast<uint32_t>(counter) * 0x7B13u ^      \
-                                   static_cast<uint32_t>(salt)))
+namespace DynamicCrypter {
+    namespace detail {
+
+        // The multipliers that spread the two hash inputs apart. Both are odd,
+        // which is the property that matters: an even multiplier would push the
+        // low bit of its product to zero and make every even source line (a
+        // 16 bit __LINE__, say) collide with its neighbour before mix32 ever
+        // runs. Named rather than inlined so the constants can be inspected and
+        // tuned in one place.
+        constexpr uint32_t kSiteHashLineMultiplier = 0x1E35Au;
+        constexpr uint32_t kSiteHashCounterMultiplier = 0x7B13u;
+
+    } // namespace detail
+} // namespace DynamicCrypter
+
+#define CRYPTER_SITE_HASH_EX(line, counter, salt)                                              \
+    (DynamicCrypter::detail::mix32(                                                            \
+        static_cast<uint32_t>(line) * DynamicCrypter::detail::kSiteHashLineMultiplier ^        \
+        static_cast<uint32_t>(counter) * DynamicCrypter::detail::kSiteHashCounterMultiplier ^  \
+        static_cast<uint32_t>(salt)))
 
 #define CRYPTER_SITE_HASH(line, counter) \
     CRYPTER_SITE_HASH_EX(line, counter, CRYPTER_BUILD_SALT)

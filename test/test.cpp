@@ -311,6 +311,38 @@ static_assert(selection_covers_all_dimensions(),
               "the automatic flavour selection does not reach every dimension value");
 
 // ---------------------------------------------------------------------------
+//  The S-box, proved rather than asserted only where it happens to be used
+// ---------------------------------------------------------------------------
+//  sbox_word() already carries the bijection static_assert internally, but it
+//  only fires for the character widths that actually select the S-box combiner.
+//  These restate it unconditionally, prove that the two tables invert each
+//  other over the whole byte range, and pin the result to the published AES
+//  S-box so that a change to the construction cannot pass unnoticed.
+static_assert(DynamicCrypter::detail::sbox_is_bijection(),
+              "the S-box construction is not a bijection");
+
+constexpr bool sbox_round_trips_every_byte() noexcept {
+    for (unsigned i = 0; i < 256u; ++i) {
+        const uint8_t byte = static_cast<uint8_t>(i);
+        if (DynamicCrypter::detail::sbox_word_inverse(
+                DynamicCrypter::detail::sbox_word<uint8_t>(byte)) != byte) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(sbox_round_trips_every_byte(),
+              "the inverse S-box does not undo the forward S-box");
+
+// Known answers from FIPS-197 (the AES S-box and its inverse).
+static_assert(DynamicCrypter::detail::g_sbox.forward[0x00] == 0x63, "AES S-box[0x00]");
+static_assert(DynamicCrypter::detail::g_sbox.forward[0x01] == 0x7C, "AES S-box[0x01]");
+static_assert(DynamicCrypter::detail::g_sbox.forward[0x53] == 0xED, "AES S-box[0x53]");
+static_assert(DynamicCrypter::detail::g_sbox.forward[0xFF] == 0x16, "AES S-box[0xFF]");
+static_assert(DynamicCrypter::detail::g_sbox.inverse[0x63] == 0x00, "AES inverse S-box[0x63]");
+static_assert(DynamicCrypter::detail::g_sbox.inverse[0xED] == 0x53, "AES inverse S-box[0xED]");
+
+// ---------------------------------------------------------------------------
 //  Runtime helpers
 // ---------------------------------------------------------------------------
 // Re-enters one single CRYPT_STR() call site while the previous object from
@@ -547,6 +579,13 @@ int main() {
         message.clear();
         report("clear() ends the string",
                !message.isEncrypted() && message.get()[0] == '\0');
+
+        // clear() is terminal and idempotent: a second call has nothing left to
+        // wipe, and neither a read nor an encrypt() can bring the string back.
+        message.clear();
+        message.encrypt();
+        report("clear() is idempotent and final",
+               !message.isEncrypted() && message.get()[0] == '\0');
     }
 
     // The destructor runs the same clear() that was just checked, so the wipe
@@ -566,6 +605,21 @@ int main() {
     }
     report("CRYPT_STR() in a loop", loop_ok);
     report("CRYPT_STR() re-entered at one site", nest_same_site(4) == 0);
+
+    // -----------------------------------------------------------------------
+    //  6. The S-box, on the tables this build actually uses
+    // -----------------------------------------------------------------------
+    //  The same checks as above, re-run at run time, so that the tables the
+    //  program actually reaches are validated as well - not only the ones the
+    //  compiler proved while it was evaluating the constant expressions.
+    std::printf("\n[:] the S-box tables\n");
+    report("forward and inverse form a bijection",
+           DynamicCrypter::detail::sbox_is_bijection());
+    report("every byte round-trips", sbox_round_trips_every_byte());
+    report("still the published AES S-box",
+           DynamicCrypter::detail::g_sbox.forward[0x00] == 0x63 &&
+               DynamicCrypter::detail::g_sbox.forward[0x53] == 0xED &&
+               DynamicCrypter::detail::g_sbox.inverse[0xED] == 0x53);
 
     if (g_failures == 0) {
         std::printf("\n[+] all checks passed\n");
