@@ -109,10 +109,11 @@ _ReSharper*/
 
 # ---------------------------------------------------------------------------
 #  Tooling scratch
-#  Reasonix keeps per-task runtime state under .reasonix/tasks/. Anything
-#  authored under .reasonix/ (for example .reasonix/skills/) stays tracked.
+#  Everything under .reasonix/ is local agent state and stays out of the
+#  repository: the per-task runtime state, and any notes or runbooks written
+#  for an agent working in this tree.
 # ---------------------------------------------------------------------------
-.reasonix/tasks/
+.reasonix/
 
 # ---------------------------------------------------------------------------
 #  Backup and log files
