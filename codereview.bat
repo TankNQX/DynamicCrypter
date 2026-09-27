@@ -13,10 +13,21 @@ echo 🔍 Direct local link stream active...
 echo -----------------------------------------------------------------
 
 :: Run code review cleanly relying on the stored wizard credentials
-:: Capture output as UTF-8 (no BOM) so the report renders on GitHub.
-:: Tee-Object is avoided on purpose: Windows PowerShell 5.1 writes its
-:: file as UTF-16LE, which GitHub and most Markdown tooling cannot decode.
-powershell -NoProfile -Command "& { $path = Join-Path (Get-Location) 'review_report_%TIMESTAMP%.md'; $sw = New-Object System.IO.StreamWriter($path, $false, (New-Object System.Text.UTF8Encoding($false))); try { ocr scan --path '%TARGET_DIR%' --concurrency 1 2>&1 | ForEach-Object { $l = $_.ToString(); Write-Host $l; $sw.WriteLine($l) } } finally { $sw.Dispose() } }"
+::
+:: Making the report readable on GitHub takes two independent fixes:
+::
+::   1. The file has to be UTF-8, not UTF-16LE. Tee-Object -FilePath writes
+::      UTF-16LE under Windows PowerShell, which GitHub cannot decode, so the
+::      output goes through a StreamWriter with UTF8Encoding(false) instead.
+::      The live console echo is kept.
+::
+::   2. The child output has to be decoded as UTF-8. PowerShell reads a native
+::      command's stdout using [Console]::OutputEncoding, which is the OEM code
+::      page when this runs from an ordinary console. ocr writes UTF-8, so
+::      without this the report is mojibake: a box-drawing character shows up as
+::      the three letters "O-tilde o-diaeresis C-cedilla". Setting it before ocr
+::      runs fixes both the written file and what the console echo shows.
+powershell -NoProfile -Command "& { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $path = Join-Path (Get-Location) 'review_report_%TIMESTAMP%.md'; $sw = New-Object System.IO.StreamWriter($path, $false, (New-Object System.Text.UTF8Encoding($false))); try { ocr scan --path '%TARGET_DIR%' --concurrency 1 2>&1 | ForEach-Object { $l = $_.ToString(); Write-Host $l; $sw.WriteLine($l) } } finally { $sw.Dispose() } }"
 
 echo -----------------------------------------------------------------
 echo ✅ Code review pipeline run complete.
